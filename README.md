@@ -15,8 +15,8 @@ Supports **small indels**, **contig-batched processing**, **multi-sample paralle
   - Targets via **BED** (0-based half-open) or **GFF3/GTF**
   - A directory of **BAM/CRAM** files (indexed)
 - Output:
-  - One `sample.fa` per input BAM/CRAM
-  - One `sample.json` QC/stats per sample
+  - One `sample.fa` per BAM/CRAM
+  - One `sample.json` QC/stats per sample (optional)
 - **Indel support** (small ins/del, changes sequence length) with anti-false-positive heuristics:
   - read-end distance filter
   - flank base-quality filter
@@ -44,7 +44,7 @@ cargo build --release
 
 ## Quick Start
 
-### 1) BED targets + directory of BAMs
+### BED targets + BAM directory
 
 ```bash
 ./target/release/bam2cons \
@@ -58,8 +58,6 @@ cargo build --release
   --min-depth 8 --min-af 0.75 \
   --enable-indel \
   --min-indel-depth 8 --min-indel-af 0.85 \
-  --max-indel-len 50 \
-  --indel-end-dist 12 --indel-flank 6 \
   --indel-top2-ratio 3.0 \
   --indel-mismatch-window 10 --indel-min-mismatch-bases 6 --indel-max-mismatch-rate 0.20 \
   --batch-by-contig --merge-gap 10000 --max-window 5000000 \
@@ -67,17 +65,11 @@ cargo build --release
   --jobs 8
 ```
 
-Outputs:
-- `out/<sample>.fa`
-- `out/<sample>.json`
-
 ---
 
 ## Spliced CDS Reconstruction (GFF/GTF)
 
-### Recommended: per gene keep the longest transcript (default)
-
-Use `--feature CDS` with a GFF3 or GTF:
+### Default: keep the longest transcript per gene
 
 ```bash
 ./target/release/bam2cons \
@@ -86,23 +78,11 @@ Use `--feature CDS` with a GFF3 or GTF:
   --feature CDS \
   --bam-dir ./bams \
   --out-dir ./out \
-  --mode strict \
-  --lowconf-fallback ref \
   --keep-longest \
-  --write-json \
-  --jobs 8
+  --write-json
 ```
 
-**Behavior**
-- Reads all `CDS` records.
-- Groups CDS blocks by **gene → transcript**.
-- Reconstructs **spliced CDS** per transcript by concatenating blocks in transcript order:
-  - `+` strand: ascending coordinates
-  - `-` strand: descending coordinates
-- Applies **phase/frame trimming** (`0/1/2`) at the **first CDS block** of the transcript.
-- With `--keep-longest` (default), outputs **one CDS per gene** (the transcript with maximal total CDS length).
-
-### Output all transcripts per gene (append transcript ID)
+### Output all transcripts (append transcript ID)
 
 ```bash
 ./target/release/bam2cons \
@@ -116,24 +96,11 @@ Use `--feature CDS` with a GFF3 or GTF:
   --write-json
 ```
 
-Record naming:
-- keep-longest=true: `gene_id`
-- keep-longest=false + append-transcript=true: `gene_id|transcript_id`
-
-> If `--append-transcript false`, record name may be gene-only (not recommended if you output multiple transcripts).
-
-### If transcript/mRNA info is missing
-
-If CDS entries do not provide transcript identifiers (e.g., missing `transcript_id`/`Parent`):
-- bam2cons assumes **subsequent CDS belong to the same gene** (file order matters)
-- They are assigned to a default transcript (e.g., `tx1`) under that gene.
-
 ---
 
 ## File Formats
 
 ### Reference FASTA
-
 Must have `.fai`:
 
 ```bash
@@ -142,10 +109,30 @@ samtools faidx ref.fa
 
 ### Targets
 
-#### BED
-- 0-based, half-open `[start, end)`
-- Minimal: `chrom  start  end`
-- Optional: `name` (col 4), `strand` (col 6)
+#### BED (BED3 / BED6)
+- **0-based**, half-open intervals: `[start, end)`
+- `--bed` selects BED as target source
+
+Supported columns:
+
+1. **chrom**: contig/chromosome name (must match reference FASTA)
+2. **start**: 0-based start (inclusive)
+3. **end**: 0-based end (exclusive)
+
+Optional (BED6):
+
+4. **name**: target name  
+   - Used in FASTA record naming and JSON stats.
+   - If absent, bam2cons auto-generates a name.
+
+5. **score**: numeric score (often 0–1000 by convention)  
+   - **Ignored by bam2cons** (no filtering/scoring).
+
+6. **strand**: `+` or `-`  
+   - Only used when `--respect-strand` is enabled.
+   - If `strand == '-'`, output is **reverse-complemented** for that target.
+
+Example (BED6):
 
 ```text
 chr1    1000    2000    geneA   0   +
@@ -153,7 +140,7 @@ chr2    500     900     geneB   0   -
 ```
 
 #### GFF3 / GTF
-- 1-based inclusive coordinates
+- **1-based inclusive** coordinates
 - `--feature` selects which feature becomes targets (e.g., `gene`, `exon`, `CDS`)
 - **CDS splicing mode** is enabled when `--feature CDS` is used with `--gff/--gtf`
 
@@ -162,24 +149,16 @@ chr2    500     900     geneB   0   -
 ## Output
 
 ### FASTA
-
-Each record header includes:
-- sample
-- target name (or spliced transcript name)
-- coordinates / run parameters (mode, thresholds, indel filters)
-
-Notes:
 - `--wrap N` controls FASTA line wrapping (format only; does not affect consensus).
-- `--respect-strand` will reverse-complement outputs for `-` strand targets (BED col6 / GFF/GTF strand).
+- `--respect-strand` reverse-complements `-` strand outputs (BED col6 / GFF/GTF strand).
 
 ### JSON QC / Stats
-
-Each `<sample>.json` includes:
+If enabled, each `<sample>.json` contains:
 - run parameters
 - per-target statistics
 - totals
 
-Selected per-target fields:
+Useful per-target counters:
 - `ref_len`, `out_len`
 - `n_bases`
 - `ref_fallback_bases`
@@ -195,34 +174,247 @@ Selected per-target fields:
   - `skipped_indel_topratio`
   - `skipped_indel_lowconf`
 
-Quick interpretation:
-- High `ref_fallback_bases` / `low_depth_bases`: insufficient coverage → consider adjusting `--min-depth` or filtering targets.
-- High `indel_rejected_mismatch` / `skipped_indel_topratio`: ambiguous/repetitive region → indels are conservatively skipped (length preserved).
+---
+
+# Command Line Parameters (Full Reference)
+
+> Below documents **all parameters** as implemented in `Cli` (`src/cli.rs`).
 
 ---
 
-## Parameter Guide (Practical)
+## Input / Output
 
-### Keep output “complete” (fewer Ns)
-- `--lowconf-fallback ref` (default)
-- In strict mode:
+### `--ref-fa <PATH>`
+Reference FASTA (requires `.fai`). Used for:
+- fetching reference bases
+- generating consensus in `ref` mode
+- fallback when low confidence (if `--lowconf-fallback ref`)
+
+### `--bam-dir <DIR>`
+Directory containing BAM/CRAM files. The tool scans recursively.
+
+### `--out-dir <DIR>`
+Output directory. Writes:
+- `<sample>.fa`
+- `<sample>.json` (if enabled)
+
+### `--bed <PATH>`
+BED targets (0-based, half-open). Mutually exclusive with `--gff/--gtf`.
+
+### `--gff <PATH>`
+GFF3 targets. Mutually exclusive with `--bed/--gtf`.
+
+### `--gtf <PATH>`
+GTF targets. Mutually exclusive with `--bed/--gff`.
+
+### `--feature <STRING>` (default: `gene`)
+For GFF/GTF: which feature type to extract as targets (e.g. `gene`, `exon`, `CDS`).
+
+- If `--feature CDS` with `--gff/--gtf`, bam2cons enters **spliced CDS mode** (see below).
+
+---
+
+## Consensus Calling Mode
+
+### `--mode <ref|majority|strict|iupac>` (default: `majority`)
+Controls how the per-position consensus base is chosen.
+
+- `ref`: output reference bases only (fastest; ignores BAM evidence).
+- `majority`: choose the most frequent base among A/C/G/T (after filters).
+- `strict`: choose top base only if its allele fraction ≥ `--min-af`; otherwise fallback.
+- `iupac`: if top base AF < `--min-af` but both top1 & top2 AF ≥ `--min-iupac-af`, output IUPAC code; otherwise fallback.
+
+### `--lowconf-fallback <ref|n>` (default: `ref`)
+When confidence is insufficient (low depth / low AF), output:
+- `ref`: reference base (more complete; fewer Ns)
+- `n`: output `N` (more conservative)
+
+---
+
+## Read Filtering
+
+### `--min-mapq <INT>` (default: `20`)
+Minimum mapping quality for reads to contribute.
+
+### `--min-baseq <INT>` (default: `20`)
+Minimum base quality for bases to contribute.
+
+### `--min-depth <INT>` (default: `10`)
+Minimum depth (count of accepted A/C/G/T observations) required for a confident call.
+
+- In `strict/iupac`, depth is checked first; if below => fallback.
+- In `majority`, low depth still triggers fallback (per current implementation).
+
+### `--min-af <FLOAT>` (default: `0.7`)
+Minimum allele fraction required in `strict` (and also used as “high-confidence” threshold in `iupac`).
+
+### `--min-iupac-af <FLOAT>` (default: `0.2`)
+In `iupac` mode: minimum AF required for the second allele to be considered present and generate an IUPAC mixture call.
+
+### `--ignore-duplicates <true|false>` (default: `true`)
+If true, PCR duplicates do not contribute.
+
+---
+
+## Indel Calling / Application
+
+> Indels change output sequence length. bam2cons applies indels **conservatively** to avoid false length changes.
+
+### `--enable-indel <true|false>` (default: `true`)
+Turn on/off applying small insertions/deletions inferred from pileup.
+
+### `--max-indel-len <INT>` (default: `50`)
+Maximum indel length to apply. Larger indels are rejected.
+
+### `--min-indel-depth <INT>` (default: `6`)
+Minimum number of reads (after filters) supporting an indel to be considered.
+
+### `--min-indel-af <FLOAT>` (default: `0.7`)
+Minimum indel allele fraction among indel-supporting reads required to apply.
+
+### `--indel-end-dist <INT>` (default: `10`)
+Reject indel support from reads if the indel anchor is too close to read ends.
+This reduces alignment artifacts near ends.
+
+### `--indel-flank <INT>` (default: `5`)
+For reads supporting an indel: require that base qualities in `[qpos-flank, qpos+flank]` are all ≥ `--min-baseq`.
+
+### `--require-indel-strand-balance <true|false>` (default: `false`)
+If true, indel must have support on both strands (plus and minus) to be applied.
+- More reliable
+- May lose real indels under strong strand bias
+
+### `--indel-top2-ratio <FLOAT>` (default: `3.0`)
+Indel “main-shape consistency” filter.
+
+For each position, for insertions and deletions separately:
+- find top1 (most supported) indel and top2 (second)
+- require `top1 >= top2 * ratio` (top2=0 passes)
+If not, indel is considered ambiguous and will be skipped.
+
+### `--indel-mismatch-window <INT>` (default: `10`)
+Indel-support read mismatch heuristic: window size (bp) around indel anchor to sample mismatches vs reference.
+
+### `--indel-min-mismatch-bases <INT>` (default: `6`)
+Minimum number of comparable bases within the mismatch window (A/C/G/T, baseQ≥min) required.
+If fewer, that read’s indel support is rejected (low comparability, often near clipping/poor regions).
+
+### `--indel-max-mismatch-rate <FLOAT>` (default: `0.20`)
+Maximum mismatch rate allowed for a read to count as indel-supporting.
+Higher mismatch rate often indicates misalignment → false indel.
+
+---
+
+## Strand Handling
+
+### `--respect-strand <true|false>` (default: `false`)
+If true:
+- For BED: uses column 6 strand if present
+- For GFF/GTF: uses strand column
+- If strand is `-`, output reverse-complemented sequence for that target/transcript
+
+Notes:
+- For **spliced CDS mode**, strand ordering is applied at the block level and then optional reverse-complementing produces transcript-oriented output.
+
+---
+
+## FASTA Formatting
+
+### `--wrap <INT>` (default: `60`)
+FASTA line width. Sequence is wrapped every N characters.
+- Format-only (no effect on consensus)
+- To effectively disable wrapping: set a very large value (e.g. `--wrap 1000000000`)
+
+---
+
+## Multi-sample Parallelism
+
+### `--jobs <INT>` (default: `4`)
+Number of samples processed in parallel (thread pool size).
+Tune based on CPU + storage throughput.
+
+---
+
+## File Discovery
+
+### `--include-cram <true|false>` (default: `true`)
+Include `.cram` files when scanning `--bam-dir`.
+
+### `--include-bam <true|false>` (default: `true`)
+Include `.bam` files when scanning `--bam-dir`.
+
+### `--skip-existing <true|false>` (default: `false`)
+If true, skip a sample if its output FASTA exists (and JSON exists if `--write-json` is enabled).
+
+---
+
+## Contig-batched Processing (Windows)
+
+### `--batch-by-contig <true|false>` (default: `true`)
+If true, merge nearby targets into larger windows per contig, fetch pileup once per window, then generate each target from that window’s evidence.
+- Faster on many small targets
+- Reduces random IO
+
+### `--merge-gap <INT>` (default: `10000`)
+When batching, merge two adjacent targets into one window if the gap between them ≤ merge-gap.
+
+### `--max-window <INT>` (default: `5000000`)
+When batching, do not create windows larger than this many bp (guards memory/time).
+
+---
+
+## JSON Output
+
+### `--write-json <true|false>` (default: `true`)
+If true, write `<sample>.json` with per-target and total QC stats.
+
+---
+
+## Spliced CDS Mode (GFF/GTF + `--feature CDS` only)
+
+> In this mode, bam2cons reconstructs **spliced CDS per transcript** by concatenating CDS blocks.
+
+### `--keep-longest <true|false>` (default: `true`)
+If true:
+- for each gene, keep only the transcript with the maximum total CDS length.
+
+If false:
+- output all transcripts for each gene.
+
+### `--append-transcript <true|false>` (default: `true`)
+Only meaningful when `--keep-longest false`.
+
+If true:
+- FASTA record name becomes `gene_id|transcript_id`.
+
+If false:
+- record name may remain gene-only (not recommended when outputting multiple transcripts).
+
+Fallback behavior if transcript/mRNA identifiers are missing:
+- If CDS records do not contain transcript identifiers (e.g., missing `transcript_id` / `Parent`),
+  bam2cons assumes subsequent CDS belong to the same gene (file order dependent) and assigns a default transcript (e.g., `tx1`).
+
+---
+
+## Practical Recipes
+
+### “Complete output” (minimize Ns)
+- `--lowconf-fallback ref`
+- `--mode strict`
+- moderate thresholds:
   - `--min-depth 6–10`
   - `--min-af 0.7–0.8`
 
-### Avoid false indels (recommended baseline)
+### “Avoid false indels” baseline
 - `--min-indel-af 0.85`
 - `--min-indel-depth 8`
 - `--indel-top2-ratio 3.0`
 - `--indel-max-mismatch-rate 0.20`
-- `--indel-end-dist 10–12`
-- `--max-indel-len 50`
 
-If true indels are being missed:
-- First relax:
-  - `--indel-max-mismatch-rate 0.25`
-  - `--indel-top2-ratio 2.0`
-- Then consider relaxing:
-  - `--min-indel-af` (e.g. 0.85 → 0.75)
+If true indels are being missed, relax in this order:
+1) `--indel-max-mismatch-rate 0.25`
+2) `--indel-top2-ratio 2.0`
+3) then consider lowering `--min-indel-af`
 
 ---
 
