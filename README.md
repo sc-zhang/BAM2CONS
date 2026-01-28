@@ -1,4 +1,4 @@
-# bam2cons
+# BAM2CONS
 
 Generate **per-sample consensus FASTA** for **target regions** directly from **BAM/CRAM pileup** — **without VCF/SNP calling**.  
 Supports **small indels**, **contig-batched processing**, **multi-sample parallelism**, **JSON QC/stats**, and **spliced CDS reconstruction** from GFF/GTF.
