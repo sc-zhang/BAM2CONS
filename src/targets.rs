@@ -202,7 +202,7 @@ fn gtf_get(attrs: &str, key: &str) -> Option<String> {
             continue;
         }
         if part.starts_with(key) {
-            let rest = part[key.len()..].trim();
+            let rest = part.strip_prefix(key).unwrap_or(part).trim();
             let rest = rest.strip_prefix('"').unwrap_or(rest);
             let val = rest.split('"').next().unwrap_or(rest).trim();
             if !val.is_empty() {
@@ -231,7 +231,7 @@ fn attr_get(attrs: &str, key: &str, is_gtf: bool) -> Option<String> {
                 continue;
             }
             if part.starts_with(key) {
-                let rest = part[key.len()..].trim();
+                let rest = part.strip_prefix(key).unwrap_or(part).trim();
                 let rest = rest.strip_prefix('"').unwrap_or(rest);
                 let val = rest.split('"').next().unwrap_or(rest).trim();
                 if !val.is_empty() {
@@ -370,9 +370,9 @@ pub fn read_spliced_cds(
 
     // Convert to SplicedTarget list and optionally keep-longest per gene
     let mut per_gene: BTreeMap<String, Vec<SplicedTarget>> = BTreeMap::new();
-    let mut next_id: usize = 0;
+    //let mut next_id: usize = 0;
 
-    for ((gene_id, transcript_id), a) in acc {
+    for (next_id, ((gene_id, transcript_id), a)) in acc.into_iter().enumerate() {
         let total_len: i64 = a.blocks.iter().map(|b| b.end - b.start).sum();
         let name = if keep_longest {
             gene_id.clone()
@@ -391,7 +391,7 @@ pub fn read_spliced_cds(
             name,
             blocks: a.blocks,
         };
-        next_id += 1;
+        //next_id += 1;
         per_gene.entry(gene_id).or_default().push(st);
 
         // you can store total_len somewhere; easiest is recompute when selecting longest

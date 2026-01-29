@@ -7,11 +7,11 @@ mod splice;
 mod targets;
 mod utils;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use clap::Parser;
 use cli::Cli;
 use consensus::{
-    collect_window_evidence, consensus_from_window_with_stats, ConsensusParams, SampleStats,
+    ConsensusParams, SampleStats, collect_window_evidence, consensus_from_window_with_stats,
 };
 use fasta_writer::FastaWriter;
 use rayon::prelude::*;
@@ -24,10 +24,10 @@ use std::path::{Path, PathBuf};
 use tracing::{info, warn};
 use walkdir::WalkDir;
 
-use targets::{read_bed, read_gff_like, Target};
+use targets::{Target, read_bed, read_gff_like};
 // Spliced CDS mode types / parser (you need these in src/targets.rs)
 use splice::build_spliced_cds_seq;
-use targets::{read_spliced_cds, SplicedTarget};
+use targets::{SplicedTarget, read_spliced_cds};
 use utils::revcomp_in_place;
 
 #[derive(Clone, Debug)]
@@ -155,8 +155,8 @@ fn main() -> Result<()> {
                 let win_ev = collect_window_evidence(&fa, bam_path, &w.chrom, w.start, w.end, &params)
                     .with_context(|| format!("collect evidence {} {}:{}-{}", sample, w.chrom, w.start, w.end))?;
 
-                for tid in w.target_ids.iter().copied() {
-                    let st = *spliced_by_id.get(&tid).expect("spliced target id exists");
+                for tid in w.target_ids.iter() {
+                    let st = *spliced_by_id.get(tid).expect("spliced target id exists");
 
                     let (seq, tstats) = build_spliced_cds_seq(&win_ev, st, &params, cli.respect_strand)
                         .with_context(|| format!("spliced CDS consensus {} {}", sample, st.name))?;
@@ -165,7 +165,7 @@ fn main() -> Result<()> {
                         "{}|{}|{}|mode={:?}|fallback={:?}|indel={}|min_depth={}|min_af={:.3}|min_indel_af={:.3}|top2_ratio={:.2}|mm_rate<= {:.2}",
                         sample,
                         st.name,
-                        format!("{}:{}-{}", st.chrom, w.start, w.end),
+                        format_args!("{}:{}-{}", st.chrom, w.start, w.end),
                         cli.mode,
                         cli.lowconf_fallback,
                         cli.enable_indel,
@@ -255,15 +255,13 @@ fn main() -> Result<()> {
                 let win_ev = collect_window_evidence(&fa, bam_path, &w.chrom, w.start, w.end, &params)
                     .with_context(|| format!("collect evidence {} {}:{}-{}", sample, w.chrom, w.start, w.end))?;
 
-                for tid in w.target_ids.iter().copied() {
-                    let t = *target_by_id.get(&tid).expect("target id exists");
+                for tid in w.target_ids.iter() {
+                    let t = *target_by_id.get(tid).expect("target id exists");
                     let (mut seq, tstats) = consensus_from_window_with_stats(&win_ev, t.start, t.end, &t.name, t.id, &params)
                         .with_context(|| format!("consensus {} {}:{}-{}", sample, t.chrom, t.start, t.end))?;
 
-                    if cli.respect_strand {
-                        if let Some('-') = t.strand {
-                            revcomp_in_place(&mut seq);
-                        }
+                    if cli.respect_strand && let Some('-') = t.strand {
+                        revcomp_in_place(&mut seq);
                     }
 
                     let header = format!(

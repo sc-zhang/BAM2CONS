@@ -1,10 +1,9 @@
 use crate::cli::{LowConfFallback, Mode};
 use crate::utils::{base_to_index, index_to_base, is_acgt, iupac_code, passes_flank_qual};
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use rust_htslib::bam::{
-    self,
+    self, Read,
     pileup::{Indel, Pileup},
-    Read,
 };
 use rust_htslib::faidx;
 use serde::{Deserialize, Serialize};
@@ -172,6 +171,12 @@ pub fn collect_window_evidence(
             bam_path.display()
         )
     })?;
+    let mismatch_threshold = MismatchThreshold {
+        win: params.indel_mismatch_window,
+        min_compared: params.indel_min_mismatch_bases,
+        max_rate: params.indel_max_mismatch_rate,
+        min_baseq: params.min_baseq,
+    };
 
     for p in reader.pileup() {
         let pile: Pileup = p?;
@@ -202,15 +207,15 @@ pub fn collect_window_evidence(
             }
 
             // base
-            if !aln.is_del() {
-                if let Some(qpos) = aln.qpos() {
-                    let bq = rec.qual()[qpos] as u8;
-                    if bq >= params.min_baseq {
-                        let base = rec.seq().as_bytes()[qpos].to_ascii_uppercase();
-                        if let Some(i) = base_to_index(base) {
-                            evidence[idx].base_counts[i] += 1;
-                            evidence[idx].base_depth += 1;
-                        }
+            if !aln.is_del()
+                && let Some(qpos) = aln.qpos()
+            {
+                let bq = rec.qual()[qpos];
+                if bq >= params.min_baseq {
+                    let base = rec.seq().as_bytes()[qpos].to_ascii_uppercase();
+                    if let Some(i) = base_to_index(base) {
+                        evidence[idx].base_counts[i] += 1;
+                        evidence[idx].base_depth += 1;
                     }
                 }
             }
@@ -245,16 +250,7 @@ pub fn collect_window_evidence(
             }
 
             // mismatch-rate heuristic around anchor
-            match passes_mismatch_rate(
-                &ref_seq,
-                idx,
-                &rec,
-                qpos,
-                params.indel_mismatch_window,
-                params.indel_min_mismatch_bases,
-                params.indel_max_mismatch_rate,
-                params.min_baseq,
-            ) {
+            match passes_mismatch_rate(&ref_seq, idx, &rec, qpos, mismatch_threshold) {
                 Ok(true) => {}
                 Ok(false) => {
                     evidence[idx].indel_rejected_mismatch += 1;
@@ -343,15 +339,20 @@ enum MismatchErr {
 /// counts only where baseQ>=min_baseq and ref is A/C/G/T.
 /// - If comparable < min_compared: Err(TooFewComparable)
 /// - Else returns mismatch_rate <= max_rate
+#[derive(Copy, Clone)]
+struct MismatchThreshold {
+    win: usize,
+    min_compared: usize,
+    max_rate: f32,
+    min_baseq: u8,
+}
+
 fn passes_mismatch_rate(
     ref_seq: &[u8],
     idx: usize,
     rec: &bam::Record,
     qpos: usize,
-    win: usize,
-    min_compared: usize,
-    max_rate: f32,
-    min_baseq: u8,
+    threshold: MismatchThreshold,
 ) -> Result<bool, MismatchErr> {
     let read = rec.seq().as_bytes();
     let qual = rec.qual();
@@ -359,13 +360,13 @@ fn passes_mismatch_rate(
     let mut compared = 0usize;
     let mut mism = 0usize;
 
-    for d in 1..=win {
+    for d in 1..=threshold.win {
         // left
         if idx >= d && qpos >= d {
             let rb = read[qpos - d].to_ascii_uppercase();
-            let rq = qual[qpos - d] as u8;
+            let rq = qual[qpos - d];
             let fb = ref_seq[idx - d].to_ascii_uppercase();
-            if rq >= min_baseq && is_acgt(fb) && is_acgt(rb) {
+            if rq >= threshold.min_baseq && is_acgt(fb) && is_acgt(rb) {
                 compared += 1;
                 if rb != fb {
                     mism += 1;
@@ -375,9 +376,9 @@ fn passes_mismatch_rate(
         // right
         if idx + d < ref_seq.len() && qpos + d < read.len() {
             let rb = read[qpos + d].to_ascii_uppercase();
-            let rq = qual[qpos + d] as u8;
+            let rq = qual[qpos + d];
             let fb = ref_seq[idx + d].to_ascii_uppercase();
-            if rq >= min_baseq && is_acgt(fb) && is_acgt(rb) {
+            if rq >= threshold.min_baseq && is_acgt(fb) && is_acgt(rb) {
                 compared += 1;
                 if rb != fb {
                     mism += 1;
@@ -386,12 +387,12 @@ fn passes_mismatch_rate(
         }
     }
 
-    if compared < min_compared {
+    if compared < threshold.min_compared {
         return Err(MismatchErr::TooFewComparable);
     }
 
     let rate = mism as f32 / compared as f32;
-    Ok(rate <= max_rate)
+    Ok(rate <= threshold.max_rate)
 }
 
 pub fn consensus_from_window_with_stats(
@@ -637,7 +638,7 @@ fn best_insertion_with_second(
 ) -> BestIns {
     let mut v: Vec<(Vec<u8>, u32)> = all.iter().map(|(k, &c)| (k.clone(), c)).collect();
     v.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
-    let top1 = v.get(0).cloned();
+    let top1 = v.first().cloned();
     let top2 = v.get(1).cloned();
     if let Some((seq, cnt)) = top1 {
         let p = *plus.get(&seq).unwrap_or(&0);
@@ -675,7 +676,7 @@ fn best_deletion_with_second(
 ) -> BestDel {
     let mut v: Vec<(usize, u32)> = all.iter().map(|(&k, &c)| (k, c)).collect();
     v.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
-    let top1 = v.get(0).cloned();
+    let top1 = v.first().cloned();
     let top2 = v.get(1).cloned();
     if let Some((len, cnt)) = top1 {
         let p = *plus.get(&len).unwrap_or(&0);
